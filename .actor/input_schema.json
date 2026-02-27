@@ -1,0 +1,25 @@
+{
+    "title": "Tastly Google Maps Scraper Input",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "startUrls": {
+            "title": "Restaurant URLs",
+            "type": "array",
+            "description": "Google Maps place or search URLs to scrape reviews from.",
+            "editor": "requestListSources",
+            "prefill": [
+                { "url": "https://www.google.com/maps/search/Flemings+Prime+Steakhouse+Coral+Gables+FL" }
+            ]
+        },
+        "maxItems": {
+            "title": "Max Reviews",
+            "type": "integer",
+            "description": "Maximum number of reviews to scrape per restaurant.",
+            "default": 100,
+            "minimum": 1,
+            "maximum": 5000
+        }
+    },
+    "required": ["startUrls"]
+}
