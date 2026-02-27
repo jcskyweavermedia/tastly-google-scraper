@@ -126,6 +126,64 @@ for (const { url } of startUrls) {
             }
 
             // -----------------------------------------------------------------
+            // DEBUG: Dump DOM structure to identify review card selectors
+            // -----------------------------------------------------------------
+            const debug = await page.evaluate(() => {
+                const results: string[] = [];
+                // Check for data-review-id elements
+                const reviewIdEls = document.querySelectorAll("[data-review-id]");
+                results.push(`[data-review-id] elements: ${reviewIdEls.length}`);
+
+                // Check for common Google Maps review selectors
+                const selectors = [
+                    'div.jftiEf', 'div.jJc9Ad', 'div.GHT2ce',
+                    'div[jsaction*="review"]', 'div.WMbnJf',
+                    'div.m6QErb', 'div.DxyBCb', 'div.WNBkOb',
+                    'div[data-review-id]', 'div.MyEned',
+                    'span.wiI7pd', 'span.rsqaWe',
+                    'div.d4r55', 'button.WEBjve',
+                ];
+                for (const sel of selectors) {
+                    const count = document.querySelectorAll(sel).length;
+                    if (count > 0) results.push(`  ${sel}: ${count}`);
+                }
+
+                // Dump the main panel first 5 children
+                const mainPanel = document.querySelector('div[role="main"]');
+                if (mainPanel) {
+                    results.push(`Main panel children: ${mainPanel.children.length}`);
+                    for (let i = 0; i < Math.min(mainPanel.children.length, 8); i++) {
+                        const child = mainPanel.children[i];
+                        const tag = child.tagName;
+                        const cls = child.className ? ` class="${String(child.className).slice(0, 80)}"` : "";
+                        const text = (child.textContent || "").trim().slice(0, 60);
+                        results.push(`  [${i}] ${tag}${cls}: "${text}"`);
+                    }
+                }
+
+                // Look for any element with star rating aria-label
+                const starEls = document.querySelectorAll('[aria-label*="star"]');
+                results.push(`Star aria-label elements: ${starEls.length}`);
+                if (starEls.length > 0) {
+                    const first = starEls[0];
+                    results.push(`  First star: tag=${first.tagName}, aria-label="${first.getAttribute("aria-label")}"`);
+                    // Walk up to find card container
+                    let el: Element | null = first;
+                    for (let d = 0; d < 8 && el; d++) {
+                        const attrs = Array.from(el.attributes).filter(a => a.name.startsWith("data-")).map(a => `${a.name}="${a.value.slice(0, 30)}"`).join(" ");
+                        results.push(`    depth ${d}: ${el.tagName} class="${String(el.className).slice(0, 60)}" ${attrs}`);
+                        el = el.parentElement;
+                    }
+                }
+
+                return results;
+            });
+            log.info("  === DOM DEBUG ===");
+            for (const line of debug) {
+                log.info(`    ${line}`);
+            }
+
+            // -----------------------------------------------------------------
             // Find the scrollable reviews container and scroll to load reviews
             // -----------------------------------------------------------------
             const scrollable = await page.$('div[role="main"] div.m6QErb.DxyBCb, div.m6QErb.WNBkOb');
