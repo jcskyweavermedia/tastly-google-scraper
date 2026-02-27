@@ -41,10 +41,20 @@ try {
     }
 }
 
+/**
+ * Ensure the URL has hl=en to force English regardless of proxy location.
+ */
+function ensureEnglish(rawUrl: string): string {
+    const u = new URL(rawUrl);
+    u.searchParams.set("hl", "en");
+    return u.toString();
+}
+
 // ---------------------------------------------------------------------------
 // Process each restaurant URL independently
 // ---------------------------------------------------------------------------
-for (const { url } of startUrls) {
+for (const { url: rawUrl } of startUrls) {
+    const url = ensureEnglish(rawUrl);
     log.info(`\n=== Processing ${url} ===`);
 
     const collectedReviews: GoogleReview[] = [];
@@ -73,180 +83,222 @@ for (const { url } of startUrls) {
 
             log.info(`Navigating to ${request.url}`);
             await page.goto(request.url, { waitUntil: "domcontentloaded", timeout: 60000 });
-            await page.waitForTimeout(3000);
+            await page.waitForTimeout(4000);
 
             // -----------------------------------------------------------------
-            // If this is a search URL, it may resolve to a place page directly
-            // or show search results. If search results, click first result.
+            // Dismiss cookie consent if present
             // -----------------------------------------------------------------
-            const isSearchUrl = request.url.includes("/maps/search/");
-            if (isSearchUrl) {
-                // Wait for either a place panel or search results
+            const consentBtn = await page.$('button[aria-label="Accept all"], form[action*="consent"] button');
+            if (consentBtn) {
+                log.info("  Dismissing consent dialog...");
+                await consentBtn.click().catch(() => {});
+                await page.waitForTimeout(2000);
+            }
+
+            // -----------------------------------------------------------------
+            // If this is a search URL, click first place result
+            // -----------------------------------------------------------------
+            if (request.url.includes("/maps/search/")) {
                 await page.waitForTimeout(2000);
                 const firstResult = await page.$('a[href*="/maps/place/"]');
                 if (firstResult) {
-                    log.info("  Search results found, clicking first result...");
+                    log.info("  Clicking first search result...");
                     await firstResult.click();
-                    await page.waitForTimeout(3000);
+                    await page.waitForTimeout(4000);
                 }
             }
 
             // -----------------------------------------------------------------
-            // Click the "Reviews" tab to open the reviews panel
+            // Navigate to Reviews tab
+            // Tab buttons have role="tab" — Reviews is typically the 2nd tab
             // -----------------------------------------------------------------
-            const reviewsTab = await page.$('button[aria-label*="Reviews"], button[data-tab-index="1"]');
-            if (reviewsTab) {
-                log.info("  Clicking Reviews tab...");
-                await reviewsTab.click();
-                await page.waitForTimeout(2000);
-            } else {
-                // Try clicking the review count text (e.g., "1,234 reviews")
-                const reviewLink = await page.$('button:has-text("review"), span:has-text("review")');
-                if (reviewLink) {
-                    await reviewLink.click();
-                    await page.waitForTimeout(2000);
+            let reviewsClicked = false;
+
+            // Strategy 1: button with aria-label containing "Reviews"
+            const reviewsTabByLabel = await page.$('button[role="tab"][aria-label*="Reviews"], button[role="tab"][aria-label*="reviews"]');
+            if (reviewsTabByLabel) {
+                log.info("  Clicking Reviews tab (aria-label match)...");
+                await reviewsTabByLabel.click();
+                reviewsClicked = true;
+            }
+
+            // Strategy 2: tab buttons — click the one with "Review" text
+            if (!reviewsClicked) {
+                const tabs = await page.$$('button[role="tab"]');
+                for (const tab of tabs) {
+                    const text = await tab.textContent();
+                    if (text && /review/i.test(text)) {
+                        log.info(`  Clicking tab: "${text.trim()}"...`);
+                        await tab.click();
+                        reviewsClicked = true;
+                        break;
+                    }
                 }
             }
 
+            // Strategy 3: data-tab-index="1" (Reviews is typically index 1)
+            if (!reviewsClicked) {
+                const tabByIndex = await page.$('button[data-tab-index="1"]');
+                if (tabByIndex) {
+                    log.info("  Clicking tab index 1...");
+                    await tabByIndex.click();
+                    reviewsClicked = true;
+                }
+            }
+
+            if (!reviewsClicked) {
+                log.warning("  Could not find Reviews tab");
+            }
+
+            // Wait for reviews to load
+            await page.waitForTimeout(3000);
+
             // -----------------------------------------------------------------
-            // Sort by "Newest" if the sort button is available
+            // Sort by "Newest"
             // -----------------------------------------------------------------
-            const sortButton = await page.$('button[aria-label="Sort reviews"], button[data-value="Sort"]');
+            const sortButton = await page.$('button[aria-label="Sort reviews"], button[aria-label*="sort" i], button[data-value="Sort"]');
             if (sortButton) {
                 log.info("  Opening sort menu...");
                 await sortButton.click();
                 await page.waitForTimeout(1000);
-                // Click "Newest" option in the dropdown
-                const newestOption = await page.$('li[data-index="1"], div[role="menuitemradio"]:has-text("Newest")');
-                if (newestOption) {
-                    log.info("  Sorting by Newest...");
-                    await newestOption.click();
-                    await page.waitForTimeout(2000);
+
+                // Click "Newest" in the menu
+                const menuItems = await page.$$('div[role="menuitemradio"], li[role="menuitemradio"]');
+                for (const item of menuItems) {
+                    const text = await item.textContent();
+                    if (text && /newest/i.test(text)) {
+                        log.info("  Sorting by Newest...");
+                        await item.click();
+                        await page.waitForTimeout(2000);
+                        break;
+                    }
                 }
             }
 
             // -----------------------------------------------------------------
-            // DEBUG: Dump DOM structure to identify review card selectors
+            // DOM diagnostic — identify review card selector
             // -----------------------------------------------------------------
-            const debug = await page.evaluate(() => {
-                const results: string[] = [];
-                // Check for data-review-id elements
-                const reviewIdEls = document.querySelectorAll("[data-review-id]");
-                results.push(`[data-review-id] elements: ${reviewIdEls.length}`);
-
-                // Check for common Google Maps review selectors
-                const selectors = [
-                    'div.jftiEf', 'div.jJc9Ad', 'div.GHT2ce',
-                    'div[jsaction*="review"]', 'div.WMbnJf',
-                    'div.m6QErb', 'div.DxyBCb', 'div.WNBkOb',
-                    'div[data-review-id]', 'div.MyEned',
-                    'span.wiI7pd', 'span.rsqaWe',
-                    'div.d4r55', 'button.WEBjve',
+            const reviewSelector = await page.evaluate(() => {
+                // Try multiple known selectors for review cards
+                const candidates = [
+                    'div[data-review-id]',
+                    'div.jftiEf',
+                    'div.jJc9Ad',
+                    'div.GHT2ce',
                 ];
-                for (const sel of selectors) {
+                for (const sel of candidates) {
                     const count = document.querySelectorAll(sel).length;
-                    if (count > 0) results.push(`  ${sel}: ${count}`);
+                    if (count > 0) return { selector: sel, count };
                 }
 
-                // Dump the main panel first 5 children
-                const mainPanel = document.querySelector('div[role="main"]');
-                if (mainPanel) {
-                    results.push(`Main panel children: ${mainPanel.children.length}`);
-                    for (let i = 0; i < Math.min(mainPanel.children.length, 8); i++) {
-                        const child = mainPanel.children[i];
-                        const tag = child.tagName;
-                        const cls = child.className ? ` class="${String(child.className).slice(0, 80)}"` : "";
-                        const text = (child.textContent || "").trim().slice(0, 60);
-                        results.push(`  [${i}] ${tag}${cls}: "${text}"`);
-                    }
-                }
-
-                // Look for any element with star rating aria-label
-                const starEls = document.querySelectorAll('[aria-label*="star"]');
-                results.push(`Star aria-label elements: ${starEls.length}`);
+                // Fallback: find elements with star rating aria-labels
+                // and walk up to find the common card container
+                const starEls = document.querySelectorAll('[role="img"][aria-label*="star" i]');
                 if (starEls.length > 0) {
-                    const first = starEls[0];
-                    results.push(`  First star: tag=${first.tagName}, aria-label="${first.getAttribute("aria-label")}"`);
-                    // Walk up to find card container
-                    let el: Element | null = first;
-                    for (let d = 0; d < 8 && el; d++) {
-                        const attrs = Array.from(el.attributes).filter(a => a.name.startsWith("data-")).map(a => `${a.name}="${a.value.slice(0, 30)}"`).join(" ");
-                        results.push(`    depth ${d}: ${el.tagName} class="${String(el.className).slice(0, 60)}" ${attrs}`);
-                        el = el.parentElement;
+                    // Check parent classes to find a common container
+                    const parent = starEls[0].closest('[data-review-id], div.jftiEf, div.jJc9Ad');
+                    if (parent) {
+                        const tag = parent.tagName.toLowerCase();
+                        const cls = parent.className ? `.${String(parent.className).split(' ')[0]}` : '';
+                        return { selector: `${tag}${cls}`, count: -1 };
                     }
                 }
 
-                return results;
+                return { selector: "none", count: 0 };
             });
-            log.info("  === DOM DEBUG ===");
-            for (const line of debug) {
-                log.info(`    ${line}`);
-            }
+            log.info(`  Review card selector: "${reviewSelector.selector}" (${reviewSelector.count} found)`);
 
             // -----------------------------------------------------------------
-            // Find the scrollable reviews container and scroll to load reviews
+            // Extra diagnostics if no reviews found
             // -----------------------------------------------------------------
-            const scrollable = await page.$('div[role="main"] div.m6QErb.DxyBCb, div.m6QErb.WNBkOb');
-            if (!scrollable) {
-                log.warning("  Could not find scrollable reviews container.");
-                // Try alternative: scroll the main panel
-                const mainPanel = await page.$('div[role="main"]');
-                if (!mainPanel) {
-                    log.error("  No main panel found. Page may not have loaded correctly.");
-                    const bodyText = await page.evaluate(() => document.body?.textContent?.slice(0, 500) || "");
-                    log.warning(`  Body: ${bodyText}`);
-                    return;
+            if (reviewSelector.count === 0 && reviewSelector.selector === "none") {
+                const debugInfo = await page.evaluate(() => {
+                    const results: string[] = [];
+                    const title = document.title;
+                    results.push(`Page title: ${title}`);
+
+                    // Check all role="img" elements
+                    const imgRoles = document.querySelectorAll('[role="img"]');
+                    results.push(`role="img" elements: ${imgRoles.length}`);
+                    for (let i = 0; i < Math.min(imgRoles.length, 5); i++) {
+                        const el = imgRoles[i];
+                        results.push(`  [${i}] ${el.tagName} aria-label="${el.getAttribute("aria-label")?.slice(0, 50)}"`);
+                    }
+
+                    // Dump scrollable container content
+                    const scrollable = document.querySelector('div.m6QErb.DxyBCb') || document.querySelector('div.m6QErb');
+                    if (scrollable) {
+                        results.push(`Scrollable container children: ${scrollable.children.length}`);
+                        for (let i = 0; i < Math.min(scrollable.children.length, 5); i++) {
+                            const child = scrollable.children[i];
+                            const cls = child.className ? String(child.className).slice(0, 60) : "";
+                            const text = (child.textContent || "").trim().slice(0, 80);
+                            const dataAttrs = Array.from(child.attributes)
+                                .filter(a => a.name.startsWith("data-"))
+                                .map(a => `${a.name}="${a.value.slice(0, 20)}"`)
+                                .join(" ");
+                            results.push(`  [${i}] ${child.tagName} class="${cls}" ${dataAttrs}: "${text}"`);
+                        }
+                    } else {
+                        results.push("No scrollable container found");
+                    }
+
+                    return results;
+                });
+                log.info("  === DIAGNOSTIC ===");
+                for (const line of debugInfo) {
+                    log.info(`    ${line}`);
                 }
             }
 
-            // Scroll to load reviews — Google loads ~10 at a time
+            // -----------------------------------------------------------------
+            // Scroll the reviews panel to load more reviews
+            // -----------------------------------------------------------------
+            const cardSelector = reviewSelector.selector !== "none" ? reviewSelector.selector : 'div[data-review-id]';
+
             const maxScrollAttempts = Math.ceil(maxItems / 10) + 5;
             let lastReviewCount = 0;
             let noNewReviewsCount = 0;
 
             for (let scrollAttempt = 0; scrollAttempt < maxScrollAttempts; scrollAttempt++) {
-                // Count current reviews
                 const currentCount = await page.$$eval(
-                    'div[data-review-id], div[jsaction*="review"]',
+                    cardSelector,
                     (els: Element[]) => els.length,
                 );
 
                 if (currentCount >= maxItems) {
-                    log.info(`  Loaded ${currentCount} reviews (>= maxItems), stopping scroll`);
+                    log.info(`  Loaded ${currentCount} reviews, stopping scroll`);
                     break;
                 }
 
                 if (currentCount === lastReviewCount) {
                     noNewReviewsCount++;
                     if (noNewReviewsCount >= 3) {
-                        log.info(`  No new reviews after ${noNewReviewsCount} scrolls (${currentCount} total), stopping`);
+                        log.info(`  No new reviews after ${noNewReviewsCount} scrolls (${currentCount} total)`);
                         break;
                     }
                 } else {
                     noNewReviewsCount = 0;
-                    if (scrollAttempt % 5 === 0) {
-                        log.info(`  Loaded ${currentCount} reviews so far...`);
+                    if (scrollAttempt % 3 === 0) {
+                        log.info(`  Scrolling... ${currentCount} reviews loaded`);
                     }
                 }
                 lastReviewCount = currentCount;
 
-                // Scroll the reviews panel
                 await page.evaluate(() => {
                     const scrollEl =
-                        document.querySelector('div[role="main"] div.m6QErb.DxyBCb') ||
-                        document.querySelector('div[role="main"] div.m6QErb.WNBkOb') ||
-                        document.querySelector('div[role="main"] div.m6QErb');
-                    if (scrollEl) {
-                        scrollEl.scrollTop = scrollEl.scrollHeight;
-                    }
+                        document.querySelector('div.m6QErb.DxyBCb') ||
+                        document.querySelector('div.m6QErb.WNBkOb') ||
+                        document.querySelector('div.m6QErb');
+                    if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
                 });
-                await page.waitForTimeout(1500);
+                await page.waitForTimeout(2000);
             }
 
             // -----------------------------------------------------------------
-            // Expand all truncated review texts ("More" buttons)
+            // Expand all truncated reviews ("More" / "See more" buttons)
             // -----------------------------------------------------------------
-            const moreButtons = await page.$$('button.w8nwRe.kyuRq, button[aria-label="See more"], button:has-text("More")');
+            const moreButtons = await page.$$('button.w8nwRe.kyuRq, button[aria-label="See more"], button[aria-expanded="false"]');
             if (moreButtons.length > 0) {
                 log.info(`  Expanding ${moreButtons.length} truncated reviews...`);
                 for (const btn of moreButtons) {
@@ -258,40 +310,41 @@ for (const { url } of startUrls) {
             // -----------------------------------------------------------------
             // Extract reviews from the DOM
             // -----------------------------------------------------------------
-            const pageReviews = await page.evaluate(() => {
+            const pageReviews = await page.evaluate((sel: string) => {
                 const reviews: Array<Record<string, unknown>> = [];
-                // Google Maps review cards have data-review-id attribute
-                const cards = document.querySelectorAll('div[data-review-id]');
+                const cards = document.querySelectorAll(sel);
 
-                cards.forEach((card) => {
+                cards.forEach((card, idx) => {
                     try {
-                        const reviewId = card.getAttribute("data-review-id") || "";
-                        if (!reviewId) return;
+                        // === Review ID ===
+                        let reviewId = card.getAttribute("data-review-id") || `g-${idx}-${Date.now()}`;
 
                         // === Star rating ===
-                        // aria-label like "5 stars" or "4 stars" on the star container
                         let stars = 0;
-                        const starEl = card.querySelector('span[role="img"][aria-label*="star"]');
+                        const starEl = card.querySelector('[role="img"][aria-label*="star" i]');
                         if (starEl) {
                             const m = starEl.getAttribute("aria-label")?.match(/(\d+)/);
                             if (m) stars = parseInt(m[1]);
                         }
-                        if (!stars) {
-                            // Count filled star SVGs
-                            const filledStars = card.querySelectorAll('img[src*="star_yellow"], span.hCCjke.google-symbols');
-                            if (filledStars.length >= 1 && filledStars.length <= 5) {
-                                stars = filledStars.length;
-                            }
-                        }
 
                         // === Reviewer name ===
                         let name = "Anonymous";
+                        // Try multiple selectors for the name
                         const nameEl =
-                            card.querySelector('div.d4r55, button.WEBjve div.d4r55') ||
-                            card.querySelector('a[href*="/contrib/"] div, button[data-review-id] div.d4r55');
+                            card.querySelector('div.d4r55') ||
+                            card.querySelector('a[href*="/contrib/"] div') ||
+                            card.querySelector('button[data-review-id] div');
                         if (nameEl) {
                             const n = nameEl.textContent?.trim() || "";
                             if (n.length > 0 && n.length < 80) name = n;
+                        }
+                        // Fallback: first link text inside the card
+                        if (name === "Anonymous") {
+                            const firstLink = card.querySelector("a");
+                            if (firstLink) {
+                                const n = firstLink.textContent?.trim() || "";
+                                if (n.length > 1 && n.length < 60) name = n;
+                            }
                         }
 
                         // === Date ===
@@ -301,11 +354,10 @@ for (const { url } of startUrls) {
                             dateText = dateEl.textContent?.trim() || "";
                         }
                         if (!dateText) {
-                            // Fallback: look for text like "X months ago"
                             const spans = card.querySelectorAll("span");
                             for (const s of spans) {
                                 const t = s.textContent?.trim() || "";
-                                if (t.match(/\d+\s+(day|week|month|year)s?\s+ago/i) || t.match(/^a[n]?\s+(day|week|month|year)\s+ago$/i)) {
+                                if (/\d+\s+(day|week|month|year)s?\s+ago/i.test(t) || /^a[n]?\s+(day|week|month|year)\s+ago$/i.test(t)) {
                                     dateText = t;
                                     break;
                                 }
@@ -314,12 +366,22 @@ for (const { url } of startUrls) {
 
                         // === Review text ===
                         let text: string | null = null;
-                        const textEl =
-                            card.querySelector('span.wiI7pd') ||
-                            card.querySelector('div.MyEned span');
+                        const textEl = card.querySelector('span.wiI7pd') || card.querySelector('div.MyEned span');
                         if (textEl) {
                             const t = textEl.textContent?.trim() || "";
                             if (t.length > 0) text = t;
+                        }
+                        // Fallback: longest span with text > 30 chars
+                        if (!text) {
+                            const spans = card.querySelectorAll("span");
+                            let maxLen = 0;
+                            for (const s of spans) {
+                                const t = s.textContent?.trim() || "";
+                                if (t.length > maxLen && t.length > 30) {
+                                    text = t;
+                                    maxLen = t.length;
+                                }
+                            }
                         }
 
                         // === Owner response ===
@@ -327,17 +389,13 @@ for (const { url } of startUrls) {
                         let responseFromOwnerDate: string | null = null;
                         const responseContainer = card.querySelector('div.CDe7pd');
                         if (responseContainer) {
-                            const responseTextEl = responseContainer.querySelector('div.wiI7pd');
-                            if (responseTextEl) {
-                                responseFromOwnerText = responseTextEl.textContent?.trim() || null;
-                            }
-                            const responseDateEl = responseContainer.querySelector('span.DZSIDd');
-                            if (responseDateEl) {
-                                responseFromOwnerDate = responseDateEl.textContent?.trim() || null;
-                            }
+                            const respText = responseContainer.querySelector('div.wiI7pd, span.wiI7pd');
+                            if (respText) responseFromOwnerText = respText.textContent?.trim() || null;
+                            const respDate = responseContainer.querySelector('span.DZSIDd');
+                            if (respDate) responseFromOwnerDate = respDate.textContent?.trim() || null;
                         }
 
-                        // === Likes count ===
+                        // === Likes ===
                         let likesCount = 0;
                         const likesEl = card.querySelector('span.pkWtMe');
                         if (likesEl) {
@@ -345,84 +403,51 @@ for (const { url } of startUrls) {
                             if (m) likesCount = parseInt(m[1]);
                         }
 
-                        // === Detailed ratings (Food, Service, Atmosphere) ===
-                        let reviewDetailedRating: Record<string, number> | null = null;
-                        const ratingRows = card.querySelectorAll('div.k1MNkf, div[class*="PBBkOb"]');
-                        if (ratingRows.length > 0) {
-                            reviewDetailedRating = {};
-                            for (const row of ratingRows) {
-                                const label = row.querySelector("span")?.textContent?.trim() || "";
-                                const ratingEl = row.querySelector('span[role="img"]');
-                                if (ratingEl) {
-                                    const m = ratingEl.getAttribute("aria-label")?.match(/(\d+)/);
-                                    if (m && label) {
-                                        reviewDetailedRating[label] = parseInt(m[1]);
-                                    }
-                                }
-                            }
-                            if (Object.keys(reviewDetailedRating).length === 0) {
-                                reviewDetailedRating = null;
-                            }
-                        }
-
                         // === Reviewer info ===
                         let reviewerNumberOfReviews: number | null = null;
                         let isLocalGuide = false;
-                        const reviewerInfoEls = card.querySelectorAll('div.RfnDt span');
-                        for (const el of reviewerInfoEls) {
+                        const infoEls = card.querySelectorAll('div.RfnDt span, span');
+                        for (const el of infoEls) {
                             const t = el.textContent?.trim() || "";
                             if (t.includes("Local Guide")) isLocalGuide = true;
-                            const m = t.match(/(\d+)\s+review/);
+                            const m = t.match(/(\d+)\s+review/i);
                             if (m) reviewerNumberOfReviews = parseInt(m[1]);
                         }
 
                         if (stars >= 1 && stars <= 5) {
                             reviews.push({
-                                reviewId,
-                                name,
-                                stars,
-                                dateText,
-                                text,
-                                responseFromOwnerText,
-                                responseFromOwnerDate,
-                                likesCount,
-                                reviewDetailedRating,
-                                reviewerNumberOfReviews,
-                                isLocalGuide,
+                                reviewId, name, stars, dateText, text,
+                                responseFromOwnerText, responseFromOwnerDate,
+                                likesCount, reviewerNumberOfReviews, isLocalGuide,
                             });
                         }
                     } catch {
-                        // Skip malformed cards
+                        // Skip malformed
                     }
                 });
 
                 return reviews;
-            });
+            }, cardSelector);
 
             log.info(`  Extracted ${pageReviews.length} reviews from DOM`);
 
-            // -----------------------------------------------------------------
-            // Process extracted reviews
-            // -----------------------------------------------------------------
             for (const rev of pageReviews) {
                 if (collectedReviews.length >= maxItems) break;
                 const rid = String(rev.reviewId);
                 if (seenIds.has(rid)) continue;
                 seenIds.add(rid);
 
-                const publishedAtDate = parseRelativeDate(String(rev.dateText || ""));
-
                 collectedReviews.push({
                     reviewId: rid,
                     name: String(rev.name || "Anonymous"),
                     stars: Number(rev.stars),
-                    publishedAtDate,
+                    publishedAtDate: parseRelativeDate(String(rev.dateText || "")),
                     text: rev.text ? String(rev.text) : null,
                     reviewUrl: null,
                     responseFromOwnerText: rev.responseFromOwnerText ? String(rev.responseFromOwnerText) : null,
                     responseFromOwnerDate: rev.responseFromOwnerDate ? String(rev.responseFromOwnerDate) : null,
                     likesCount: Number(rev.likesCount || 0),
-                    reviewDetailedRating: rev.reviewDetailedRating as Record<string, number> | null,
+                    reviewDetailedRating: null,
                     reviewerNumberOfReviews: rev.reviewerNumberOfReviews != null ? Number(rev.reviewerNumberOfReviews) : null,
                     isLocalGuide: Boolean(rev.isLocalGuide),
                     language: "en",
