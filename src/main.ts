@@ -162,15 +162,37 @@ for (const { url: rawUrl } of startUrls) {
                 await sortButton.click();
                 await page.waitForTimeout(1000);
 
-                // Click "Newest" in the menu
-                const menuItems = await page.$$('div[role="menuitemradio"], li[role="menuitemradio"]');
-                for (const item of menuItems) {
-                    const text = await item.textContent();
-                    if (text && /newest/i.test(text)) {
-                        log.info("  Sorting by Newest...");
-                        await item.click();
-                        await page.waitForTimeout(2000);
-                        break;
+                // Click "Newest" in the menu — try multiple selectors
+                let sorted = false;
+                const menuSelectors = [
+                    'div[role="menuitemradio"]',
+                    'li[role="menuitemradio"]',
+                    'div[role="menuitem"]',
+                    'li[role="menuitem"]',
+                    'a[data-index]',
+                ];
+                for (const menuSel of menuSelectors) {
+                    if (sorted) break;
+                    const menuItems = await page.$$(menuSel);
+                    log.info(`  Sort menu: ${menuItems.length} items with "${menuSel}"`);
+                    for (const item of menuItems) {
+                        const text = await item.textContent();
+                        if (text && /newest/i.test(text)) {
+                            log.info(`  Sorting by Newest (${menuSel})...`);
+                            await item.click();
+                            await page.waitForTimeout(3000);
+                            sorted = true;
+                            break;
+                        }
+                    }
+                }
+                if (!sorted) {
+                    // Fallback: click the 2nd menu item (Newest is typically index 1)
+                    const allItems = await page.$$('div[role="menuitemradio"], div[role="menuitem"]');
+                    if (allItems.length >= 2) {
+                        log.info("  Fallback: clicking 2nd sort option...");
+                        await allItems[1].click();
+                        await page.waitForTimeout(3000);
                     }
                 }
             }
@@ -256,7 +278,9 @@ for (const { url: rawUrl } of startUrls) {
             // -----------------------------------------------------------------
             const cardSelector = reviewSelector.selector !== "none" ? reviewSelector.selector : 'div[data-review-id]';
 
-            const maxScrollAttempts = Math.ceil(maxItems / 10) + 5;
+            // Scroll until we have maxItems*2 cards to account for non-review cards
+            const scrollTarget = maxItems * 2;
+            const maxScrollAttempts = Math.ceil(scrollTarget / 10) + 5;
             let lastReviewCount = 0;
             let noNewReviewsCount = 0;
 
@@ -266,8 +290,8 @@ for (const { url: rawUrl } of startUrls) {
                     (els: Element[]) => els.length,
                 );
 
-                if (currentCount >= maxItems) {
-                    log.info(`  Loaded ${currentCount} reviews, stopping scroll`);
+                if (currentCount >= scrollTarget) {
+                    log.info(`  Loaded ${currentCount} cards, stopping scroll`);
                     break;
                 }
 
