@@ -1,6 +1,7 @@
 export interface GoogleScraperInput {
     startUrls: { url: string }[];
     maxItems?: number;
+    newerThan?: string; // ISO date string (YYYY-MM-DD)
 }
 
 export interface GoogleReview {

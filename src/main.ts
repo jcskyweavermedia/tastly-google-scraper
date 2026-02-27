@@ -17,10 +17,16 @@ import { parseRelativeDate } from "./utils.js";
 await Actor.init();
 
 const input = (await Actor.getInput<GoogleScraperInput>()) ?? ({} as GoogleScraperInput);
-const { startUrls = [], maxItems = 100 } = input;
+const { startUrls = [], maxItems = 100, newerThan } = input;
 
 if (!startUrls.length) {
     throw new Error("No startUrls provided. Please supply at least one Google Maps URL.");
+}
+
+// Parse newerThan date cutoff
+const dateCutoff = newerThan ? new Date(newerThan + "T00:00:00Z") : null;
+if (dateCutoff) {
+    log.info(`Date cutoff: reviews before ${newerThan} will be excluded, scrolling stops when reached`);
 }
 
 // ---------------------------------------------------------------------------
@@ -59,6 +65,7 @@ for (const { url: rawUrl } of startUrls) {
 
     const collectedReviews: GoogleReview[] = [];
     const seenIds = new Set<string>();
+    let hitDateCutoff = false;
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration,
@@ -79,7 +86,7 @@ for (const { url: rawUrl } of startUrls) {
         navigationTimeoutSecs: 60,
 
         async requestHandler({ page, request }) {
-            if (collectedReviews.length >= maxItems) return;
+            if (collectedReviews.length >= maxItems || hitDateCutoff) return;
 
             log.info(`Navigating to ${request.url}`);
             await page.goto(request.url, { waitUntil: "domcontentloaded", timeout: 60000 });
@@ -295,6 +302,11 @@ for (const { url: rawUrl } of startUrls) {
             let noNewReviewsCount = 0;
 
             for (let scrollAttempt = 0; scrollAttempt < maxScrollAttempts; scrollAttempt++) {
+                if (hitDateCutoff) {
+                    log.info(`  Date cutoff reached, stopping scroll`);
+                    break;
+                }
+
                 const currentCount = await page.$$eval(
                     cardSelector,
                     (els: Element[]) => els.length,
@@ -471,11 +483,22 @@ for (const { url: rawUrl } of startUrls) {
                 if (seenIds.has(rid)) continue;
                 seenIds.add(rid);
 
+                const publishedAtDate = parseRelativeDate(String(rev.dateText || ""));
+
+                // Date cutoff check
+                if (dateCutoff) {
+                    const revDate = new Date(publishedAtDate);
+                    if (revDate < dateCutoff) {
+                        hitDateCutoff = true;
+                        continue;
+                    }
+                }
+
                 collectedReviews.push({
                     reviewId: rid,
                     name: String(rev.name || "Anonymous"),
                     stars: Number(rev.stars),
-                    publishedAtDate: parseRelativeDate(String(rev.dateText || "")),
+                    publishedAtDate,
                     text: rev.text ? String(rev.text) : null,
                     reviewUrl: null,
                     responseFromOwnerText: rev.responseFromOwnerText ? String(rev.responseFromOwnerText) : null,
@@ -489,7 +512,7 @@ for (const { url: rawUrl } of startUrls) {
                 });
             }
 
-            log.info(`  Total collected: ${collectedReviews.length}/${maxItems}`);
+            log.info(`  Total collected: ${collectedReviews.length}/${maxItems}${hitDateCutoff ? " [CUTOFF]" : ""}`);
         },
     });
 

@@ -19,6 +19,12 @@
             "default": 100,
             "minimum": 1,
             "maximum": 5000
+        },
+        "newerThan": {
+            "title": "Newer Than",
+            "type": "string",
+            "description": "Only collect reviews newer than this date (YYYY-MM-DD). Scraping stops early once older reviews are reached. Google uses relative dates (~1 month precision), so a few extra reviews may be collected.",
+            "editor": "textfield"
         }
     },
     "required": ["startUrls"]
