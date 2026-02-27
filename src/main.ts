@@ -150,8 +150,11 @@ for (const { url: rawUrl } of startUrls) {
                 log.warning("  Could not find Reviews tab");
             }
 
-            // Wait for reviews to load
-            await page.waitForTimeout(3000);
+            // Wait for review cards to appear (up to 15s)
+            await page.waitForSelector('div[data-review-id]', { timeout: 15000 }).catch(() => {
+                log.warning("  Timed out waiting for review cards after tab click");
+            });
+            await page.waitForTimeout(1000);
 
             // -----------------------------------------------------------------
             // Sort by "Newest"
@@ -195,6 +198,13 @@ for (const { url: rawUrl } of startUrls) {
                         await page.waitForTimeout(3000);
                     }
                 }
+
+                // After sorting, wait for reviews to reload
+                log.info("  Waiting for reviews to reload after sort...");
+                await page.waitForSelector('div[data-review-id]', { timeout: 15000 }).catch(() => {
+                    log.warning("  Timed out waiting for review cards after sort");
+                });
+                await page.waitForTimeout(2000);
             }
 
             // -----------------------------------------------------------------
